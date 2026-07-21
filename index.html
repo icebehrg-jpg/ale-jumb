@@ -43,18 +43,20 @@
         
         #stage {
             position: relative;
-            width: min(96vw, 900px);
+            width: min(92vw, 1180px);
             aspect-ratio: 900 / 420;
             border-radius: 14px;
             overflow: hidden;
             box-shadow: 0 0 0 2px rgba(8, 247, 254, 0.15), 0 20px 60px rgba(0, 0, 0, 0.65), inset 0 0 60px rgba(8, 247, 254, 0.05);
             background: linear-gradient(180deg, var(--sky-top) 0%, var(--sky-mid) 62%, var(--ground) 62%);
+            touch-action: manipulation;
         }
         
         canvas {
             display: block;
             width: 100%;
             height: 100%;
+            touch-action: manipulation;
         }
         
         #hud {
@@ -175,6 +177,40 @@
             opacity: 0.7;
             pointer-events: none;
         }
+        
+        .themeToggle {
+            display: flex;
+            gap: 8px;
+            background: rgba(0, 0, 0, 0.25);
+            border: 1px solid rgba(154, 163, 199, 0.25);
+            padding: 5px;
+            border-radius: 24px;
+            margin-bottom: 2px;
+        }
+        
+        .themeBtn {
+            background: transparent;
+            color: var(--text-dim);
+            border: none;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: 700;
+            font-size: clamp(11px, 2vw, 13px);
+            cursor: pointer;
+            box-shadow: none;
+            transition: background 0.15s ease, color 0.15s ease, transform 0.12s ease;
+        }
+        
+        .themeBtn:hover {
+            transform: none;
+            box-shadow: none;
+        }
+        
+        .themeBtn.active {
+            background: linear-gradient(180deg, var(--neon-cyan), #05b8c2);
+            color: #05131a;
+            box-shadow: 0 4px 14px rgba(8, 247, 254, 0.35);
+        }
     </style>
 </head>
 
@@ -193,6 +229,10 @@
             <div class="overlay" id="startOverlay">
                 <h1 class="title">ALE <span>RUNNER</span></h1>
                 <p class="subtitle">Corra pela metrópole e desvie de quem dorme no chão, do rato que atravessa correndo e das pombas que cruzam o caminho voando. Toque uma vez pra pular e uma segunda vez, ainda no ar, pro pulo duplo alcançar as pombas mais altas.</p>
+                <div class="themeToggle">
+                    <button type="button" class="themeBtn active" id="nightBtn">🌙 Noite</button>
+                    <button type="button" class="themeBtn" id="dayBtn">☀️ Dia</button>
+                </div>
                 <button id="startBtn">Começar a correr</button>
             </div>
 
@@ -212,18 +252,39 @@
             const canvas = document.getElementById('game');
             const ctx = canvas.getContext('2d');
 
-            // logical resolution
+            // logical resolution (coordinate system used by all game math/drawing)
             const LW = 900,
                 LH = 420;
+            const stageEl = document.getElementById('stage');
+
+            function fitStage() {
+                const pad = 20;
+                const maxW = 1180,
+                    maxH = 780;
+                const availW = Math.min(window.innerWidth - pad * 2, maxW);
+                const availH = Math.min(window.innerHeight - pad * 2, maxH);
+                const ratio = LW / LH;
+                let w = Math.max(280, availW);
+                let h = w / ratio;
+                if (h > availH) {
+                    h = Math.max(140, availH);
+                    w = h * ratio;
+                }
+                stageEl.style.width = w + 'px';
+                stageEl.style.height = h + 'px';
+                resize();
+            }
 
             function resize() {
                 const dpr = window.devicePixelRatio || 1;
                 const rect = canvas.getBoundingClientRect();
-                canvas.width = LW * dpr;
-                canvas.height = LH * dpr;
-                ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+                const scale = rect.width / LW;
+                canvas.width = Math.round(rect.width * dpr);
+                canvas.height = Math.round(rect.height * dpr);
+                ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
             }
-            window.addEventListener('resize', resize);
+            window.addEventListener('resize', fitStage);
+            window.addEventListener('orientationchange', fitStage);
 
             // ---- assets ----
             const aleImg = new Image();
@@ -326,6 +387,18 @@
             const retryBtn = document.getElementById('retryBtn');
             const finalScoreEl = document.getElementById('finalScore');
             const newBestMsg = document.getElementById('newBestMsg');
+            const nightBtn = document.getElementById('nightBtn');
+            const dayBtn = document.getElementById('dayBtn');
+
+            let dayMode = false;
+
+            function setTheme(isDay) {
+                dayMode = isDay;
+                nightBtn.classList.toggle('active', !isDay);
+                dayBtn.classList.toggle('active', isDay);
+            }
+            nightBtn.addEventListener('click', () => setTheme(false));
+            dayBtn.addEventListener('click', () => setTheme(true));
 
             function pad(n) {
                 return String(Math.floor(n)).padStart(6, '0');
@@ -415,19 +488,15 @@
                     }
                 }
             });
-            canvas.addEventListener('pointerdown', () => {
+            canvas.addEventListener('pointerdown', (e) => {
+                e.preventDefault();
                 if (!running && !gameOver) {
                     startGame();
                     return;
                 }
                 doJump();
-            });
-            document.getElementById('stage').addEventListener('pointerdown', (e) => {
-                if (e.target.tagName === 'BUTTON') return;
-                if (!running && !gameOver) {
-                    return;
-                }
-                doJump();
+            }, {
+                passive: false
             });
 
             startBtn.addEventListener('click', startGame);
@@ -567,37 +636,73 @@
                 }
             }
 
-            function drawSky() {
-                const grad = ctx.createLinearGradient(0, 0, 0, HORIZON);
-                grad.addColorStop(0, '#0b1029');
-                grad.addColorStop(0.55, '#181f47');
-                grad.addColorStop(1, '#232a5c');
-                ctx.fillStyle = grad;
-                ctx.fillRect(0, 0, LW, HORIZON);
-
-                // moon
-                ctx.save();
+            function drawCloud(x, y, s) {
                 ctx.beginPath();
-                ctx.fillStyle = 'rgba(255,212,96,0.85)';
-                ctx.shadowColor = 'rgba(255,212,96,0.55)';
-                ctx.shadowBlur = 25;
-                ctx.arc(LW - 90, 60, 26, 0, Math.PI * 2);
+                ctx.ellipse(x, y, s, s * 0.6, 0, 0, Math.PI * 2);
+                ctx.ellipse(x + s * 0.7, y + s * 0.12, s * 0.72, s * 0.5, 0, 0, Math.PI * 2);
+                ctx.ellipse(x - s * 0.6, y + s * 0.18, s * 0.58, s * 0.44, 0, 0, Math.PI * 2);
                 ctx.fill();
-                ctx.restore();
-
-                // stars
-                ctx.fillStyle = 'rgba(255,255,255,0.55)';
-                for (let i = 0; i < 60; i++) {
-                    const sx = (i * 137.5) % LW;
-                    const sy = (i * 71) % (HORIZON - 40) + 6;
-                    const tw = 0.4 + 0.6 * Math.abs(Math.sin(frame * 0.02 + i));
-                    ctx.globalAlpha = tw * 0.6;
-                    ctx.fillRect(sx, sy, 2, 2);
-                }
-                ctx.globalAlpha = 1;
             }
 
-            function drawBuildings(arr, baseColor, winColor, alpha) {
+            function drawSky() {
+                if (dayMode) {
+                    const grad = ctx.createLinearGradient(0, 0, 0, HORIZON);
+                    grad.addColorStop(0, '#6fb6e8');
+                    grad.addColorStop(0.55, '#a9dcf5');
+                    grad.addColorStop(1, '#e3f3fb');
+                    ctx.fillStyle = grad;
+                    ctx.fillRect(0, 0, LW, HORIZON);
+
+                    // sun
+                    ctx.save();
+                    ctx.beginPath();
+                    ctx.fillStyle = 'rgba(255,225,130,0.95)';
+                    ctx.shadowColor = 'rgba(255,225,130,0.65)';
+                    ctx.shadowBlur = 30;
+                    ctx.arc(LW - 100, 64, 30, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.restore();
+
+                    // drifting clouds
+                    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+                    for (let i = 0; i < 6; i++) {
+                        const spread = LW + 220;
+                        const cx = ((i * 170 - frame * 0.18) % spread + spread) % spread - 110;
+                        const cy = 36 + (i % 3) * 30;
+                        drawCloud(cx, cy, 26 + (i % 3) * 8);
+                    }
+                } else {
+                    const grad = ctx.createLinearGradient(0, 0, 0, HORIZON);
+                    grad.addColorStop(0, '#0b1029');
+                    grad.addColorStop(0.55, '#181f47');
+                    grad.addColorStop(1, '#232a5c');
+                    ctx.fillStyle = grad;
+                    ctx.fillRect(0, 0, LW, HORIZON);
+
+                    // moon
+                    ctx.save();
+                    ctx.beginPath();
+                    ctx.fillStyle = 'rgba(255,212,96,0.85)';
+                    ctx.shadowColor = 'rgba(255,212,96,0.55)';
+                    ctx.shadowBlur = 25;
+                    ctx.arc(LW - 90, 60, 26, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.restore();
+
+                    // stars
+                    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+                    for (let i = 0; i < 60; i++) {
+                        const sx = (i * 137.5) % LW;
+                        const sy = (i * 71) % (HORIZON - 40) + 6;
+                        const tw = 0.4 + 0.6 * Math.abs(Math.sin(frame * 0.02 + i));
+                        ctx.globalAlpha = tw * 0.6;
+                        ctx.fillRect(sx, sy, 2, 2);
+                    }
+                    ctx.globalAlpha = 1;
+                }
+            }
+
+            function drawBuildings(arr, baseColor, winColor, alpha, offColor) {
                 ctx.globalAlpha = alpha;
                 for (const b of arr) {
                     const top = HORIZON - b.h;
@@ -613,7 +718,7 @@
                             if (wx + 6 > b.x + b.w - 3) continue;
                             const idx = (Math.floor(b.x) + r * 7 + c * 13) % flicker.length;
                             const on = flicker[Math.abs(idx)] > 0.45;
-                            ctx.fillStyle = on ? winColor : 'rgba(255,255,255,0.04)';
+                            ctx.fillStyle = on ? winColor : (offColor || 'rgba(255,255,255,0.04)');
                             ctx.fillRect(wx, wy, 6, 8);
                         }
                     }
@@ -622,15 +727,15 @@
             }
 
             function drawGround() {
-                ctx.fillStyle = '#13141f';
+                ctx.fillStyle = dayMode ? '#dfe4ea' : '#13141f';
                 ctx.fillRect(0, HORIZON, LW, LH - HORIZON);
 
                 // road glow line
-                ctx.fillStyle = 'rgba(8,247,254,0.5)';
+                ctx.fillStyle = dayMode ? 'rgba(70,110,140,0.45)' : 'rgba(8,247,254,0.5)';
                 ctx.fillRect(0, HORIZON, LW, 2);
 
                 // scrolling dashes
-                ctx.fillStyle = '#2c2f4a';
+                ctx.fillStyle = dayMode ? '#aebac6' : '#2c2f4a';
                 const dashW = 34,
                     gap = 26;
                 const off = (distance * 0.9) % (dashW + gap);
@@ -740,8 +845,13 @@
             function render() {
                 ctx.clearRect(0, 0, LW, LH);
                 drawSky();
-                drawBuildings(farBuildings, '#141a3a', 'rgba(255,212,96,0.55)', 0.75);
-                drawBuildings(nearBuildings, '#0e1230', 'rgba(8,247,254,0.5)', 0.95);
+                if (dayMode) {
+                    drawBuildings(farBuildings, '#bcd7ea', 'rgba(140,175,195,0.5)', 0.65, 'rgba(255,255,255,0.35)');
+                    drawBuildings(nearBuildings, '#9dc3dc', 'rgba(110,150,175,0.6)', 0.9, 'rgba(255,255,255,0.4)');
+                } else {
+                    drawBuildings(farBuildings, '#141a3a', 'rgba(255,212,96,0.55)', 0.75);
+                    drawBuildings(nearBuildings, '#0e1230', 'rgba(8,247,254,0.5)', 0.95);
+                }
                 drawGround();
                 drawObstacles();
                 drawPlayer();
@@ -750,7 +860,7 @@
                 // vignette
                 const vg = ctx.createRadialGradient(LW / 2, LH / 2, LH * 0.3, LW / 2, LH / 2, LW * 0.7);
                 vg.addColorStop(0, 'rgba(0,0,0,0)');
-                vg.addColorStop(1, 'rgba(0,0,0,0.35)');
+                vg.addColorStop(1, dayMode ? 'rgba(0,0,0,0.12)' : 'rgba(0,0,0,0.35)');
                 ctx.fillStyle = vg;
                 ctx.fillRect(0, 0, LW, LH);
             }
@@ -763,7 +873,7 @@
                 requestAnimationFrame(loop);
             }
 
-            resize();
+            fitStage();
             bestBox.textContent = "recorde " + pad(best);
             scoreBox.textContent = pad(0);
             requestAnimationFrame(loop);
