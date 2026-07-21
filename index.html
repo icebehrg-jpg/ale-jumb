@@ -187,12 +187,13 @@
                     <div id="scoreBox">000000</div>
                     <div id="best">recorde 000000</div>
                 </div>
-                <div id="hint">espaço / toque para pular</div>
+                <div id="hint">espaço / toque: pula • toque de novo no ar: pulo duplo</div>
             </div>
 
             <div class="overlay" id="startOverlay">
                 <h1 class="title">ALE <span>RUNNER</span></h1>
-                <p class="subtitle">Corra pela metrópole e pule por cima de quem dorme no meio do caminho. Quanto mais longe, mais rápido fica.</p>
+                <p class="subtitle">Corra pela metrópole e desvie de quem dorme no chão — e agora também no ar. Toque uma vez pra pular e uma segunda vez, ainda no ar, pro pulo duplo alcançar os obstáculos mais altos.
+                </p>
                 <button id="startBtn">Começar a correr</button>
             </div>
 
@@ -203,7 +204,7 @@
                 <button id="retryBtn">Correr de novo</button>
             </div>
 
-            <div id="tapHint">dica: segure o pulo perto do chão para pular mais longe</div>
+            <div id="tapHint">dica: obstáculos voando marcados em vermelho só passam com pulo duplo</div>
         </div>
     </div>
 
@@ -243,17 +244,26 @@
                 y: 0,
                 vy: 0,
                 grounded: true,
-                rot: 0
+                rot: 0,
+                jumpsUsed: 0
             };
             player.y = GROUND_Y - player.h;
 
             const GRAVITY = 0.62;
             const JUMP_V = -13.6;
+            const DOUBLE_JUMP_V = -11.8;
+            const MAX_JUMPS = 2;
+
+            // little burst of particles when the double jump fires
+            let particles = [];
 
             // obstacles
             let obstacles = [];
             const OBS_W = 132,
                 OBS_H = 44; // aspect ~320x107 scaled
+            // altitude bands for flying obstacles, relative to GROUND_Y (how high their belly sits)
+            const FLY_LOW = 118; // clearable with a single jump
+            const FLY_HIGH = 205; // needs the double jump to clear in time
 
             // buildings (parallax layers)
             function makeSkyline(count, minH, maxH, seedOffset) {
@@ -323,6 +333,8 @@
                 player.vy = 0;
                 player.grounded = true;
                 player.rot = 0;
+                player.jumpsUsed = 0;
+                particles = [];
                 spawnTimer = 0;
                 nextSpawnGap = 70 + Math.random() * 40;
                 frame = 0;
@@ -355,9 +367,34 @@
                 if (!running) {
                     return;
                 }
+                if (player.jumpsUsed >= MAX_JUMPS) {
+                    return;
+                }
                 if (player.grounded) {
                     player.vy = JUMP_V;
                     player.grounded = false;
+                    player.jumpsUsed = 1;
+                } else {
+                    // pulo duplo no ar
+                    player.vy = DOUBLE_JUMP_V;
+                    player.jumpsUsed = MAX_JUMPS;
+                    spawnDoubleJumpBurst();
+                }
+            }
+
+            function spawnDoubleJumpBurst() {
+                const cx = player.x + player.w / 2;
+                const cy = player.y + player.h * 0.75;
+                for (let i = 0; i < 10; i++) {
+                    const ang = (Math.PI * 2) * (i / 10);
+                    particles.push({
+                        x: cx,
+                        y: cy,
+                        vx: Math.cos(ang) * 2.2 - gameSpeed * 0.3,
+                        vy: Math.sin(ang) * 2.2 + 1,
+                        life: 22,
+                        maxLife: 22
+                    });
                 }
             }
 
@@ -393,12 +430,38 @@
                 const scale = 0.85 + Math.random() * 0.5;
                 const w = OBS_W * scale;
                 const h = OBS_H * scale;
-                obstacles.push({
-                    x: LW + 20,
-                    y: GROUND_Y - h + 6,
-                    w,
-                    h
-                });
+
+                // chance of a flying obstacle grows with distance, capped so it never dominates
+                const flyChance = Math.min(0.45, distance / 4500);
+                const isFlying = distance > 500 && Math.random() < flyChance;
+
+                if (!isFlying) {
+                    obstacles.push({
+                        type: 'ground',
+                        x: LW + 20,
+                        y: GROUND_Y - h + 6,
+                        w,
+                        h,
+                        baseY: 0,
+                        bobPhase: 0
+                    });
+                } else {
+                    // pick altitude band: low ones clear with one jump, high ones need the double jump
+                    const needsDouble = Math.random() < 0.5;
+                    const band = needsDouble ? FLY_HIGH : FLY_LOW;
+                    const jitter = (Math.random() - 0.5) * 24;
+                    const baseY = GROUND_Y - h / 2 - band + jitter;
+                    obstacles.push({
+                        type: 'air',
+                        x: LW + 20,
+                        y: baseY,
+                        w: w * 0.92,
+                        h: h * 0.92,
+                        baseY,
+                        bobPhase: Math.random() * Math.PI * 2,
+                        needsDouble
+                    });
+                }
             }
 
             function update() {
@@ -414,6 +477,7 @@
                     player.y = GROUND_Y - player.h;
                     player.vy = 0;
                     player.grounded = true;
+                    player.jumpsUsed = 0;
                 }
                 // tilt while jumping
                 const targetRot = player.grounded ? 0 : Math.max(-0.18, Math.min(0.12, player.vy * 0.012));
@@ -428,10 +492,25 @@
                     nextSpawnGap = (68 - gapReduction) + Math.random() * 40;
                 }
                 for (let i = obstacles.length - 1; i >= 0; i--) {
-                    obstacles[i].x -= gameSpeed;
-                    if (obstacles[i].x + obstacles[i].w < -20) {
+                    const o = obstacles[i];
+                    o.x -= gameSpeed;
+                    if (o.type === 'air') {
+                        o.bobPhase += 0.09;
+                        o.y = o.baseY + Math.sin(o.bobPhase) * 10;
+                    }
+                    if (o.x + o.w < -20) {
                         obstacles.splice(i, 1);
                     }
+                }
+
+                // particles (pulo duplo)
+                for (let i = particles.length - 1; i >= 0; i--) {
+                    const p = particles[i];
+                    p.x += p.vx;
+                    p.y += p.vy;
+                    p.vy += 0.15;
+                    p.life--;
+                    if (p.life <= 0) particles.splice(i, 1);
                 }
 
                 // collision (shrunk hitboxes for fairness)
@@ -574,18 +653,62 @@
             function drawObstacles() {
                 for (const o of obstacles) {
                     ctx.save();
-                    // contact shadow
-                    ctx.fillStyle = 'rgba(0,0,0,0.32)';
-                    ctx.beginPath();
-                    ctx.ellipse(o.x + o.w / 2, GROUND_Y - 2, o.w * 0.42, 7, 0, 0, Math.PI * 2);
-                    ctx.fill();
-                    if (obsImg.complete && obsImg.naturalWidth) {
-                        ctx.drawImage(obsImg, o.x, o.y, o.w, o.h);
+                    if (o.type === 'air') {
+                        // ground shadow shrinks with altitude to sell the height
+                        const alt = GROUND_Y - (o.y + o.h);
+                        const shadowScale = Math.max(0.25, 1 - alt / 260);
+                        ctx.fillStyle = 'rgba(0,0,0,' + (0.28 * shadowScale) + ')';
+                        ctx.beginPath();
+                        ctx.ellipse(o.x + o.w / 2, GROUND_Y - 2, o.w * 0.4 * shadowScale, 6 * shadowScale, 0, 0, Math.PI * 2);
+                        ctx.fill();
+
+                        // motion trail streaks to read as "flying"
+                        ctx.strokeStyle = o.needsDouble ? 'rgba(255,46,99,0.35)' : 'rgba(8,247,254,0.3)';
+                        ctx.lineWidth = 2;
+                        for (let t = 1; t <= 3; t++) {
+                            ctx.beginPath();
+                            ctx.moveTo(o.x + o.w + t * 10, o.y + o.h * 0.3);
+                            ctx.lineTo(o.x + o.w + t * 10 + 12, o.y + o.h * 0.3);
+                            ctx.moveTo(o.x + o.w + t * 10, o.y + o.h * 0.7);
+                            ctx.lineTo(o.x + o.w + t * 10 + 12, o.y + o.h * 0.7);
+                            ctx.stroke();
+                        }
+
+                        const cx = o.x + o.w / 2,
+                            cy = o.y + o.h / 2;
+                        const tilt = Math.sin(o.bobPhase) * 0.06;
+                        ctx.translate(cx, cy);
+                        ctx.rotate(tilt);
+                        if (obsImg.complete && obsImg.naturalWidth) {
+                            ctx.drawImage(obsImg, -o.w / 2, -o.h / 2, o.w, o.h);
+                        } else {
+                            ctx.fillStyle = '#ff2e63';
+                            ctx.fillRect(-o.w / 2, -o.h / 2, o.w, o.h);
+                        }
                     } else {
-                        ctx.fillStyle = '#ff2e63';
-                        ctx.fillRect(o.x, o.y, o.w, o.h);
+                        // contact shadow
+                        ctx.fillStyle = 'rgba(0,0,0,0.32)';
+                        ctx.beginPath();
+                        ctx.ellipse(o.x + o.w / 2, GROUND_Y - 2, o.w * 0.42, 7, 0, 0, Math.PI * 2);
+                        ctx.fill();
+                        if (obsImg.complete && obsImg.naturalWidth) {
+                            ctx.drawImage(obsImg, o.x, o.y, o.w, o.h);
+                        } else {
+                            ctx.fillStyle = '#ff2e63';
+                            ctx.fillRect(o.x, o.y, o.w, o.h);
+                        }
                     }
                     ctx.restore();
+                }
+            }
+
+            function drawParticles() {
+                for (const p of particles) {
+                    const a = Math.max(0, p.life / p.maxLife);
+                    ctx.fillStyle = 'rgba(8,247,254,' + (a * 0.8) + ')';
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, 2.4 * a + 0.6, 0, Math.PI * 2);
+                    ctx.fill();
                 }
             }
 
@@ -597,6 +720,7 @@
                 drawGround();
                 drawObstacles();
                 drawPlayer();
+                drawParticles();
 
                 // vignette
                 const vg = ctx.createRadialGradient(LW / 2, LH / 2, LH * 0.3, LW / 2, LH / 2, LW * 0.7);
